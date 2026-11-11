@@ -2,6 +2,10 @@
 $FILE_NAME namespace selection, bounded attribute walking and invalid records."""
 import struct
 
+import asyncio
+import csv
+
+from src.analyzeMFT.mft_analyzer import MftAnalyzer
 from src.analyzeMFT.mft_record import MftRecord
 from tests.mft_builder import build_record, si_attr, fn_attr, data_attr
 
@@ -119,3 +123,56 @@ def test_parser_exception_in_attribute_does_not_leave_names_unbound(monkeypatch)
     monkeypatch.setattr(MftRecord, "parse_si_attribute", boom)
     rec = MftRecord(build_record([si_attr(), fn_attr("after.txt", 1)]))
     assert rec.filename == "after.txt"   # walk continued at the next attribute
+
+
+def _analyze(tmp_path, records, name="mft.bin"):
+    mft = tmp_path / name
+    mft.write_bytes(b''.join(records))
+    out = tmp_path / "out.csv"
+    analyzer = MftAnalyzer(str(mft), str(out), export_format="csv")
+    asyncio.run(analyzer.analyze())
+    return analyzer, out
+
+
+def test_zeroed_record_between_valid_ones_does_not_clobber_mft_entry(tmp_path):
+    records = [
+        build_record([si_attr(), fn_attr("$MFT", 3, parent=5)], num=0),
+        b'\x00' * 1024,
+        build_record([si_attr(), fn_attr("dir", 1, parent=5)], num=2, flags=3),
+        b'\x00' * 1024,
+        build_record([si_attr(), fn_attr("file.txt", 1, parent=2)], num=4),
+    ]
+    analyzer, out = _analyze(tmp_path, records)
+
+    assert sorted(analyzer.mft_records) == [0, 2, 4]
+    assert analyzer.mft_records[0].filename == "$MFT"
+    assert analyzer.stats['skipped_records'] == 2
+
+    rows = {int(r[0]): r for r in list(csv.reader(open(out, encoding='utf-8')))[1:]}
+    assert sorted(rows) == [0, 2, 4]
+    assert rows[0][1] == "Valid" and rows[0][7] == "$MFT"
+    assert analyzer.build_filepath(analyzer.mft_records[4]) == "UnknownParent_5" + chr(92) + "dir" + chr(92) + "file.txt"
+
+
+def test_invalid_magic_record_keeps_its_position_and_stays_out_of_paths(tmp_path):
+    bad = bytearray(build_record([si_attr(), fn_attr("ghost.txt", 1, parent=5)], num=0))
+    bad[0:4] = b'BAAD'
+    records = [
+        build_record([si_attr(), fn_attr("$MFT", 3)], num=0),
+        build_record([si_attr(), fn_attr("keep.txt", 1)], num=1),
+        bytes(bad),
+    ]
+    analyzer, out = _analyze(tmp_path, records)
+
+    assert sorted(analyzer.mft_records) == [0, 1, 2]
+    assert analyzer.mft_records[0].filename == "$MFT"
+    bad_rec = analyzer.mft_records[2]
+    assert not bad_rec.is_valid and bad_rec.filename == ""
+    assert analyzer.build_filepath(bad_rec) == "InvalidRecord_2"
+
+
+def test_record_without_header_number_uses_its_position():
+    rec = MftRecord(build_record([si_attr(), fn_attr("x.txt", 1)], num=0), record_number=9)
+    assert rec.recordnum == 9
+    rec = MftRecord(build_record([si_attr(), fn_attr("x.txt", 1)], num=40), record_number=9)
+    assert rec.recordnum == 40

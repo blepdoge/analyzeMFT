@@ -61,6 +61,7 @@ class MftAnalyzer:
         self.mft_records: Dict[int, MftRecord] = {}
         self.current_chunk: List[MftRecord] = []
         self.chunk_count = 0
+        self.record_index = 0
         self.stats = {
             'total_records': 0,
             'active_records': 0,
@@ -68,6 +69,7 @@ class MftAnalyzer:
             'files': 0,
             'bytes_processed': 0,
             'chunks_processed': 0,
+            'skipped_records': 0,
         }
         
         if self.compute_hashes:
@@ -248,9 +250,19 @@ class MftAnalyzer:
             if self.interrupt_flag.is_set():
                 break
             
+            position = self.record_index
+            self.record_index += 1
+
+            if not any(raw_record):
+                # Never-used (zero-filled) slot: nothing to report, and it must not
+                # replace a real entry in mft_records.
+                self.stats['skipped_records'] += 1
+                continue
+
             try:
                 compute_individual_hashes = self.compute_hashes and not self.multiprocessing_hashes
-                record = MftRecord(raw_record, compute_individual_hashes, self.debug, self.logger)
+                record = MftRecord(raw_record, compute_individual_hashes, self.debug, self.logger,
+                                   record_number=position)
                 self.stats['total_records'] += 1
                 
                 if self.compute_hashes and self.multiprocessing_hashes and i < len(hash_results):
@@ -410,6 +422,9 @@ class MftAnalyzer:
         current_record = record
         max_depth = 255 
 
+        if not record.is_valid:
+            return f"InvalidRecord_{record.recordnum}"
+
         while current_record and max_depth > 0:
             if current_record.recordnum == 5:
                 path_parts.insert(0, "")
@@ -426,6 +441,8 @@ class MftAnalyzer:
                 break
             
             current_record = self.mft_records.get(parent_record_num)
+            if current_record is not None and not current_record.is_valid:
+                current_record = None
             if not current_record:
                 path_parts.insert(0, f"UnknownParent_{parent_record_num}")
                 break
@@ -445,6 +462,7 @@ class MftAnalyzer:
         self.logger.warning(f"Files: {self.stats['files']}")
         self.logger.warning(f"Bytes processed: {self.stats['bytes_processed']:,}")
         self.logger.warning(f"Chunks processed: {self.stats['chunks_processed']}")
+        self.logger.warning(f"Skipped zero-filled records: {self.stats.get('skipped_records', 0)}")
         
         if self.compute_hashes:
             self.logger.warning(f"Unique MD5 hashes: {len(self.stats['unique_md5'])}")

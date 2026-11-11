@@ -13,7 +13,8 @@ from .validators import validate_attribute_length, ValidationError
 
 class MftRecord:
     
-    def __init__(self, raw_record: bytes, compute_hashes: bool = False, debug_level: int = 0, logger=None):
+    def __init__(self, raw_record: bytes, compute_hashes: bool = False, debug_level: int = 0, logger=None,
+                 record_number: Optional[int] = None):
         
         if len(raw_record) < MFT_RECORD_SIZE:
             raise ValueError(f"MFT record too short: {len(raw_record)} bytes, expected {MFT_RECORD_SIZE}")
@@ -38,6 +39,7 @@ class MftRecord:
         self.base_ref = 0
         self.next_attrid = 0
         self.recordnum = 0
+        self.position_recordnum = record_number
         self.filename = ''
         self.parent_ref = 0
         self.filesize = 0
@@ -111,6 +113,15 @@ class MftRecord:
             self.next_attrid = struct.unpack("<H", self.raw_record[MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET:MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET+MFT_RECORD_NEXT_ATTRIBUTE_ID_SIZE])[0]
             self.recordnum = struct.unpack("<I", self.raw_record[MFT_RECORD_RECORD_NUMBER_OFFSET:MFT_RECORD_RECORD_NUMBER_OFFSET+MFT_RECORD_RECORD_NUMBER_SIZE])[0]
             
+            if self.position_recordnum is not None and (not self.is_valid or self.recordnum == 0):
+                # Without a 'FILE' signature the header cannot be trusted, and old
+                # NTFS layouts have no record number field: the position in the MFT
+                # is the record number, so records never collide on number 0.
+                self.recordnum = self.position_recordnum
+
+            if not self.is_valid:
+                return
+
             self.apply_fixup()
             self.parse_attributes()
 
@@ -118,6 +129,10 @@ class MftRecord:
             self.log(f"Error parsing MFT record header for record {self.recordnum}: {e}", 0)
         except Exception as e:
             self.log(f"Unexpected error parsing MFT record {self.recordnum}: {e}", 0)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.magic == int.from_bytes(MFT_RECORD_MAGIC, BYTE_ORDER)
 
     def apply_fixup(self) -> None:
         """Undo the NTFS update sequence (fixup) protection.
@@ -501,7 +516,7 @@ class MftRecord:
     def to_csv(self) -> List[Union[str, int]]:
         row = [
             self.recordnum,
-            "Valid" if self.magic == int.from_bytes(MFT_RECORD_MAGIC, BYTE_ORDER) else "Invalid",
+            "Valid" if self.is_valid else "Invalid",
             "In Use" if self.flags & FILE_RECORD_IN_USE else "Not in Use",
             self.get_file_type(),
             self.seq,
