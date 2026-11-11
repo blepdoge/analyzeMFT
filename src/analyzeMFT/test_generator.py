@@ -22,13 +22,37 @@ class MFTTestGenerator:
         delta = dt - self.windows_epoch
         return int(delta.total_seconds() * 10000000)
     
+    @staticmethod
+    def _random_recent_time() -> datetime:
+        """A timestamp within the last year, so generated records do not all share one time."""
+        return datetime.now() - timedelta(seconds=random.randint(0, 365 * 24 * 3600))  # nosec B311
+
+    @staticmethod
+    def _resident_attribute(attr_type: int, content: bytes) -> bytes:
+        """Resident attribute: 24-byte header (DWORD length at offset 4) + content, 8-byte aligned."""
+        attr_len = (24 + len(content) + 7) // 8 * 8
+        header = struct.pack('<IIBBHHHIHBB',
+            attr_type,
+            attr_len,
+            0,              # resident
+            0,              # name length
+            0,              # name offset
+            0,              # flags
+            0,              # attribute id
+            len(content),
+            24,             # content offset
+            0,              # indexed flag
+            0               # padding
+        )
+        return (header + content).ljust(attr_len, b'\x00')
+
     def create_standard_info_attribute(self, 
                                      creation_time: Optional[datetime] = None,
                                      modification_time: Optional[datetime] = None,
                                      access_time: Optional[datetime] = None,
                                      entry_time: Optional[datetime] = None) -> bytes:
 
-        now = datetime.now()
+        now = self._random_recent_time()
         creation_time = creation_time or now
         modification_time = modification_time or now
         access_time = access_time or now
@@ -44,53 +68,34 @@ class MFTTestGenerator:
         
         si_data += b'\x00' * (48 - len(si_data))
         
-        attr_header = struct.pack('<IBBHHHH',
-            STANDARD_INFORMATION_ATTRIBUTE,
-            len(si_data) + 24,  
-            0,  
-            0,  
-            24,  
-            0,  
-            0   
-        )
-        
-        return attr_header + si_data
+        return self._resident_attribute(STANDARD_INFORMATION_ATTRIBUTE, si_data)
     
     def create_filename_attribute(self, filename: str, parent_ref: int = 5) -> bytes:
 
         filename_bytes = filename.encode('utf-16le')
         filename_length = len(filename)
-        now = datetime.now()
+        now = self._random_recent_time()
         file_size = random.randint(0, 1048576)  # nosec B311
         
         
-        fn_data = struct.pack('<Q', parent_ref)
+        fn_data = struct.pack('<Q', parent_ref | (5 << 48))
         fn_data += struct.pack('<QQQQ',
             self.windows_time(now),
             self.windows_time(now),
             self.windows_time(now),
             self.windows_time(now),
         )
-        fn_data += struct.pack('<QQII',
-            file_size,
-            file_size,
+        fn_data += struct.pack('<QQIIBB',
+            file_size,          # allocated size
+            file_size,          # real size
             FILE_ATTRIBUTE_NORMAL,
-            (filename_length << 8) | FILE_NAME_WIN32
+            0,                  # reparse tag / EA size
+            filename_length,
+            FILE_NAME_WIN32
         )
         fn_data += filename_bytes
         
-        
-        attr_header = struct.pack('<IBBHHHH',
-            FILE_NAME_ATTRIBUTE,
-            len(fn_data) + 24,  
-            0,  
-            0,  
-            24,  
-            0,  
-            0   
-        )
-        
-        return attr_header + fn_data
+        return self._resident_attribute(FILE_NAME_ATTRIBUTE, fn_data)
     
     def create_data_attribute(self, size: int = 0) -> bytes:
         """
@@ -103,44 +108,29 @@ class MFTTestGenerator:
             Data attribute bytes
         """
         if size == 0:
-            
-            attr_header = struct.pack('<IBBHHHH',
-                DATA_ATTRIBUTE,
-                24,  
-                0,   
-                0,   
-                24,  
-                0,   
-                0    
-            )
-            return attr_header
-        else:
-            
-            attr_header = struct.pack('<IBBHHHH',
-                DATA_ATTRIBUTE,
-                64,  
-                1,   
-                0,   
-                64,  
-                0,   
-                0    
-            )
-            
-            nr_data = struct.pack('<QQHHHH',
-                0,                    
-                (size + 4095) // 4096 - 1,  
-                64,                   
-                0,                    
-                0,                    
-                0                     
-            )
-            nr_data += struct.pack('<QQQ',
-                size,   
-                size,   
-                size    
-            )
-            
-            return attr_header + nr_data
+            return self._resident_attribute(DATA_ATTRIBUTE, b'')
+
+        clusters = (size + 4095) // 4096
+        data_runs = struct.pack('<BHBB', 0x21, clusters, 0x10, 0)  # one run of `clusters` at LCN 16
+        attr_len = (64 + len(data_runs) + 7) // 8 * 8
+        header = struct.pack('<IIBBHHHQQHHIQQQ',
+            DATA_ATTRIBUTE,
+            attr_len,
+            1,                  # non-resident
+            0,                  # name length
+            0,                  # name offset
+            0,                  # flags
+            0,                  # attribute id
+            0,                  # start VCN
+            clusters - 1,       # last VCN
+            64,                 # data runs offset
+            0,                  # compression unit
+            0,                  # padding
+            clusters * 4096,    # allocated size
+            size,               # real size
+            size                # initialized size
+        )
+        return (header + data_runs).ljust(attr_len, b'\x00')
     
     def create_mft_record(self, 
                          record_number: int,
@@ -162,15 +152,11 @@ class MFTTestGenerator:
         if is_directory:
             flags |= FILE_RECORD_IS_DIRECTORY
         struct.pack_into('<H', record, 22, flags)  
-        struct.pack_into('<I', record, 24, MFT_RECORD_SIZE)  
+        struct.pack_into('<I', record, 24, MFT_RECORD_SIZE)  # replaced below with the real used size
         struct.pack_into('<I', record, 28, MFT_RECORD_SIZE)  
         struct.pack_into('<Q', record, 32, 0)     
         struct.pack_into('<H', record, 40, 4)     
         struct.pack_into('<I', record, 44, record_number)  
-        
-        record[48:50] = struct.pack('<H', 1)
-        record[50:52] = struct.pack('<H', 0)
-        record[52:54] = struct.pack('<H', 0)
         
         offset = 56
         
@@ -196,7 +182,20 @@ class MFTTestGenerator:
             offset += len(data_attr)
         
         struct.pack_into('<I', record, offset, 0xFFFFFFFF)
+        struct.pack_into('<I', record, 24, offset + 8)  # bytes in use
         
+        return self.apply_fixup(record)
+    
+    @staticmethod
+    def apply_fixup(record: bytearray, usn: int = 1) -> bytes:
+        """Protect each 512-byte sector like NTFS: the update sequence array (at offset 48)
+        keeps the original last two bytes of every sector, which are replaced by the USN."""
+        upd_off, upd_cnt = struct.unpack_from('<HH', record, 4)
+        struct.pack_into('<H', record, upd_off, usn)
+        for i in range(1, upd_cnt):
+            end = i * 512
+            record[upd_off + 2 * i:upd_off + 2 * i + 2] = record[end - 2:end]
+            struct.pack_into('<H', record, end - 2, usn)
         return bytes(record)
     
     def generate_test_mft(self, 

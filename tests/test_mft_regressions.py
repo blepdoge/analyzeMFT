@@ -176,3 +176,31 @@ def test_record_without_header_number_uses_its_position():
     assert rec.recordnum == 9
     rec = MftRecord(build_record([si_attr(), fn_attr("x.txt", 1)], num=40), record_number=9)
     assert rec.recordnum == 40
+
+
+def test_generated_mft_parses_cleanly(tmp_path):
+    from src.analyzeMFT.test_generator import create_test_mft
+    path = tmp_path / "gen.mft"
+    create_test_mft(str(path), num_records=40, test_type="normal")
+    data = path.read_bytes()
+    assert len(data) == 40 * 1024
+
+    parsed = 0
+    for i in range(40):
+        raw = data[i * 1024:(i + 1) * 1024]
+        if not any(raw):
+            continue  # reserved, never-used system slots
+        rec = MftRecord(raw, record_number=i)
+        assert rec.is_valid and rec.fixup_valid
+        assert rec.recordnum == i
+        assert rec.filename and rec.filename.isprintable()
+        assert {0x10, 0x30} <= rec.attribute_types
+        assert rec.fn_times['crtime'].dtstr.startswith("20")
+        assert rec.si_times['mtime'].dtstr.startswith("20")
+        assert rec.get_parent_record_num() == (5 if i < 16 else rec.get_parent_record_num())
+        if not rec.flags & 0x02:
+            assert rec.data_attribute is not None
+        parsed += 1
+    assert parsed >= 30
+    first = MftRecord(data[:1024])
+    assert first.filename == "$MFT"
