@@ -157,32 +157,40 @@ class MftRecord:
 
     def parse_attributes(self) -> None:
         offset = int(self.attr_off)
-        
-        while offset < len(self.raw_record) - 8:
-            try:
-                self.log(f"Parsing attribute at offset {offset}", 3)
-                
-                attr_type = int(struct.unpack("<L", self.raw_record[offset:offset+4])[0])
-                attr_len = int(struct.unpack("<L", self.raw_record[offset+4:offset+8])[0])
-                
-                self.log(f"Attribute type: {attr_type}, length: {attr_len}", 3)
 
-                if attr_type == 0xffffffff or attr_len == 0:
-                    self.log("End of attributes reached", 3)
-                    break
-                
-                try:
-                    validate_attribute_length(
-                        attr_len=attr_len,
-                        offset=offset,
-                        record_size=len(self.raw_record),
-                        attr_type=attr_type
-                    )
-                except ValidationError as e:
-                    self.log(f"Attribute validation failed at record {getattr(self, 'recordnum', 'unknown')}: {e}", 0)
-                    offset += 8
-                    continue
-                
+        # Never walk past the bytes actually in use (falls back to the whole
+        # buffer if the header's used size is implausible).
+        end = len(self.raw_record)
+        if offset + 8 <= self.size <= end:
+            end = self.size
+
+        while offset + 8 <= end:
+            attr_type = int(struct.unpack("<L", self.raw_record[offset:offset+4])[0])
+            if attr_type == 0xffffffff:
+                self.log("End of attributes reached", 3)
+                break
+
+            attr_len = int(struct.unpack("<L", self.raw_record[offset+4:offset+8])[0])
+            self.log(f"Attribute type: {attr_type}, length: {attr_len}, offset: {offset}", 3)
+
+            try:
+                if attr_len < 16:
+                    raise ValidationError(f"Attribute length {attr_len} is smaller than an attribute header")
+                if offset + attr_len > end:
+                    raise ValidationError(f"Attribute at {offset} (length {attr_len}) extends past the used size {end}")
+                validate_attribute_length(
+                    attr_len=attr_len,
+                    offset=offset,
+                    record_size=len(self.raw_record),
+                    attr_type=attr_type
+                )
+            except ValidationError as e:
+                # Without a trustworthy length there is no way to find the next
+                # attribute, so stop instead of parsing garbage.
+                self.log(f"Attribute validation failed at record {self.recordnum}: {e}", 0)
+                break
+
+            try:
                 self.attribute_types.add(attr_type)
 
                 if attr_type == STANDARD_INFORMATION_ATTRIBUTE:
@@ -216,16 +224,12 @@ class MftRecord:
                 elif attr_type == LOGGED_UTILITY_STREAM_ATTRIBUTE:
                     self.parse_logged_utility_stream(offset)
 
-                offset += attr_len
-
             except Exception as e:
-                self.log(f"Error processing record {self.recordnum}: {str(e)}", 0)
-                self.log(f"attr_type: {attr_type} (type: {type(attr_type)})", 3)
-                self.log(f"attr_len: {attr_len} (type: {type(attr_len)})", 3)
-                self.log(f"offset: {offset}", 3)
+                self.log(f"Error processing attribute type {attr_type} at offset {offset} of record {self.recordnum}: {str(e)}", 0)
                 if self.debug_level >= 2:
                     traceback.print_exc()
-                offset += 1
+
+            offset += attr_len
 
     def parse_si_attribute(self, offset: int) -> None:
         try:

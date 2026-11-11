@@ -64,3 +64,58 @@ def test_dos_name_kept_when_it_is_the_only_name():
     rec = MftRecord(build_record([si_attr(), fn_attr("ONLY~1.TXT", 2, parent=7)]))
     assert rec.filename == "ONLY~1.TXT"
     assert rec.get_parent_record_num() == 7
+
+
+def _plant_garbage_attribute(raw, offset):
+    """Write a fake, well-formed $FILE_NAME attribute after the end marker."""
+    data = bytearray(raw)
+    junk = fn_attr("GARBAGE_AFTER_END.txt", 1)
+    data[offset:offset + len(junk)] = junk
+    return bytes(data)
+
+
+def test_attribute_walk_stops_at_end_marker():
+    attrs = [si_attr(), fn_attr("real.txt", 1)]
+    raw = build_record(attrs, fixup=False)
+    end_marker = 56 + sum(len(a) for a in attrs)
+    raw = _plant_garbage_attribute(raw, end_marker + 8)
+    rec = MftRecord(raw)
+    assert rec.filename == "real.txt"
+
+
+def test_attribute_walk_bounded_by_used_size_without_end_marker():
+    attrs = [si_attr(), fn_attr("real.txt", 1)]
+    raw = bytearray(build_record(attrs, fixup=False))
+    used = 56 + sum(len(a) for a in attrs)
+    raw[used:used + 4] = b'\x00\x00\x00\x00'  # no 0xFFFFFFFF marker
+    struct.pack_into('<I', raw, 24, used)
+    raw = _plant_garbage_attribute(raw, used)
+    rec = MftRecord(bytes(raw))
+    assert rec.filename == "real.txt"
+
+
+def test_invalid_attribute_length_stops_walk_instead_of_scanning_garbage():
+    attrs = [si_attr(), fn_attr("first.txt", 1), fn_attr("second.txt", 1)]
+    raw = bytearray(build_record(attrs, fixup=False))
+    fn_off = 56 + len(attrs[0])
+    struct.pack_into('<I', raw, fn_off + 4, 0x7FFFFFF0)  # corrupt length of 1st FN
+    rec = MftRecord(bytes(raw))
+    assert rec.filename == ""            # walk stopped at the corrupt attribute
+    assert 0x30 not in rec.attribute_types
+    assert 0x10 in rec.attribute_types
+
+
+def test_zero_length_attribute_stops_walk():
+    attrs = [si_attr(), fn_attr("first.txt", 1)]
+    raw = bytearray(build_record(attrs, fixup=False))
+    struct.pack_into('<I', raw, 56 + len(attrs[0]) + 4, 0)
+    rec = MftRecord(bytes(raw))
+    assert rec.attribute_types == {0x10}
+
+
+def test_parser_exception_in_attribute_does_not_leave_names_unbound(monkeypatch):
+    def boom(self, offset):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(MftRecord, "parse_si_attribute", boom)
+    rec = MftRecord(build_record([si_attr(), fn_attr("after.txt", 1)]))
+    assert rec.filename == "after.txt"   # walk continued at the next attribute
