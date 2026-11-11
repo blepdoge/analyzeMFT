@@ -21,6 +21,7 @@ class MftRecord:
         self.raw_record = raw_record
         self.disk_record = raw_record
         self.fixup_valid = True
+        self._fn_rank = -1
         self.debug_level = debug_level
         self.logger = logger or logging.getLogger('analyzeMFT.mft_record')
         
@@ -244,6 +245,17 @@ class MftRecord:
         try:
             fn_data = self.raw_record[offset+24:]
             if len(fn_data) >= 64:
+                # A file normally has several $FILE_NAME attributes (e.g. a Win32 long
+                # name plus its DOS 8.3 alias, or one per hard link). Prefer any real
+                # name over a DOS-only one and keep the first of equal rank.
+                name_len = struct.unpack("B", fn_data[64:65])[0]
+                namespace = struct.unpack("B", fn_data[65:66])[0] if len(fn_data) >= 66 else FILE_NAME_POSIX
+                rank = 0 if namespace == FILE_NAME_DOS else 1
+                if rank <= self._fn_rank:
+                    return
+                if len(fn_data) < 66 + name_len * 2:
+                    return
+                self._fn_rank = rank
                 self.parent_ref = struct.unpack("<Q", fn_data[:8])[0] & 0x0000FFFFFFFFFFFF
                 timestamps = struct.unpack("<QQQQ", fn_data[8:40])
                 self.fn_times = {
@@ -253,9 +265,7 @@ class MftRecord:
                     'atime': WindowsTime(timestamps[3] & 0xFFFFFFFF, timestamps[3] >> 32)
                 }
                 self.filesize = struct.unpack("<Q", fn_data[48:56])[0]
-                name_len = struct.unpack("B", fn_data[64:65])[0]
-                if len(fn_data) >= 66 + name_len * 2:
-                    self.filename = fn_data[66:66+name_len*2].decode('utf-16-le', errors='replace')
+                self.filename = fn_data[66:66+name_len*2].decode('utf-16-le', errors='replace')
         except struct.error as e:
             self.log(f"Error parsing FN attribute for record {self.recordnum}: {e}", 1)
 

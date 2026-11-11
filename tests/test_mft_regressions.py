@@ -44,3 +44,23 @@ def test_record_size_from_header_is_used_for_fixup():
     assert rec.fixup_valid
     assert len(rec.raw_record) == 4096
     assert rec.filename == "big.bin"
+
+
+def test_win32_name_preferred_over_dos_name_either_order():
+    long_name, dos_name = "LongFileName_document.txt", "LONGFI~1.TXT"
+    for attrs in ([fn_attr(long_name, 1), fn_attr(dos_name, 2)],
+                  [fn_attr(dos_name, 2), fn_attr(long_name, 1)]):
+        rec = MftRecord(build_record([si_attr()] + attrs))
+        assert rec.filename == long_name
+
+
+def test_win32_and_dos_and_posix_names_beat_dos_only():
+    for ns in (0, 1, 3):
+        rec = MftRecord(build_record([si_attr(), fn_attr("SHORT~1.TXT", 2), fn_attr("real name.txt", ns)]))
+        assert rec.filename == "real name.txt"
+
+
+def test_dos_name_kept_when_it_is_the_only_name():
+    rec = MftRecord(build_record([si_attr(), fn_attr("ONLY~1.TXT", 2, parent=7)]))
+    assert rec.filename == "ONLY~1.TXT"
+    assert rec.get_parent_record_num() == 7
