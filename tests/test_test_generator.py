@@ -3,6 +3,7 @@
 import pytest
 import tempfile
 import os
+import sys
 from pathlib import Path
 from src.analyzeMFT.test_generator import create_test_mft
 from src.analyzeMFT.constants import MFT_RECORD_SIZE
@@ -164,6 +165,9 @@ class TestTestGenerator:
             actual_size = output_path.stat().st_size
             assert actual_size >= expected_size
     
+    @pytest.mark.skipif(
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="needs POSIX directory permissions enforced for the current user (not Windows, not root)")
     def test_create_test_mft_permission_error(self):
         """Test handling of permission errors."""
         readonly_dir = Path(self.temp_dir) / "readonly"

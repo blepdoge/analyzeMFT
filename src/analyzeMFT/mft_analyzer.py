@@ -182,6 +182,12 @@ class MftAnalyzer:
                         self.stats['chunks_processed'] += 1
                     
                     records_processed += len(chunk)
+
+                    # Guard against a source that keeps returning data (e.g. a file
+                    # that grows or a misbehaving file object): never read more than
+                    # the size the file had when we started.
+                    if self.stats['bytes_processed'] >= file_size:
+                        break
                     
                     if self.interrupt_flag.is_set():
                         self.logger.warning("Interrupt detected. Stopping processing.")

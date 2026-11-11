@@ -279,7 +279,11 @@ class TestSQLiteWriter:
     
     def test_error_handling_invalid_path(self):
         """Test error handling for invalid database path."""
-        invalid_path = "/invalid/path/that/does/not/exist/test.db"
+        # The parent "directory" is a regular file, so it can be neither used nor
+        # created on any platform (and nothing is written outside the temp dir).
+        blocker = Path(self.temp_dir) / "not_a_directory"
+        blocker.write_text("x")
+        invalid_path = str(blocker / "sub" / "test.db")
         
         with pytest.raises(Exception):
             writer = SQLiteWriter(invalid_path, self.logger)
