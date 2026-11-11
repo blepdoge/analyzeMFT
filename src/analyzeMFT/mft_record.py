@@ -19,6 +19,8 @@ class MftRecord:
             raise ValueError(f"MFT record too short: {len(raw_record)} bytes, expected {MFT_RECORD_SIZE}")
 
         self.raw_record = raw_record
+        self.disk_record = raw_record
+        self.fixup_valid = True
         self.debug_level = debug_level
         self.logger = logger or logging.getLogger('analyzeMFT.mft_record')
         
@@ -108,12 +110,49 @@ class MftRecord:
             self.next_attrid = struct.unpack("<H", self.raw_record[MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET:MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET+MFT_RECORD_NEXT_ATTRIBUTE_ID_SIZE])[0]
             self.recordnum = struct.unpack("<I", self.raw_record[MFT_RECORD_RECORD_NUMBER_OFFSET:MFT_RECORD_RECORD_NUMBER_OFFSET+MFT_RECORD_RECORD_NUMBER_SIZE])[0]
             
+            self.apply_fixup()
             self.parse_attributes()
 
         except struct.error as e:
             self.log(f"Error parsing MFT record header for record {self.recordnum}: {e}", 0)
         except Exception as e:
             self.log(f"Unexpected error parsing MFT record {self.recordnum}: {e}", 0)
+
+    def apply_fixup(self) -> None:
+        """Undo the NTFS update sequence (fixup) protection.
+
+        The last two bytes of every 512-byte stride of the record were replaced on
+        disk by the update sequence number (USN); the original bytes live in the
+        update sequence array. On success self.raw_record holds the restored record
+        (the on-disk bytes are kept in self.disk_record). On any inconsistency
+        self.fixup_valid is set to False and the record is parsed as found.
+        """
+        alloc = self.alloc_sizef
+        if 0 < alloc <= len(self.raw_record) and alloc % FIXUP_STRIDE == 0:
+            record_size = alloc
+        else:
+            record_size = len(self.raw_record)
+
+        usa_end = self.upd_off + 2 * self.upd_cnt
+        if (self.upd_cnt < 2 or self.upd_off < 42 or usa_end > FIXUP_STRIDE
+                or (self.upd_cnt - 1) * FIXUP_STRIDE > record_size):
+            self.log(f"Invalid update sequence array in record {self.recordnum} "
+                     f"(offset {self.upd_off}, count {self.upd_cnt})", 1)
+            self.fixup_valid = False
+            return
+
+        fixed = bytearray(self.raw_record[:record_size])
+        usn = bytes(fixed[self.upd_off:self.upd_off + 2])
+        for i in range(1, self.upd_cnt):
+            end = i * FIXUP_STRIDE
+            if bytes(fixed[end - 2:end]) != usn:
+                self.log(f"Update sequence mismatch in record {self.recordnum} at sector {i}", 1)
+                self.fixup_valid = False
+                continue
+            saved = self.upd_off + 2 * i
+            fixed[end - 2:end] = fixed[saved:saved + 2]
+
+        self.raw_record = fixed
 
     def parse_attributes(self) -> None:
         offset = int(self.attr_off)

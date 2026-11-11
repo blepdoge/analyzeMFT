@@ -44,6 +44,7 @@ class FileNameNamespace(IntEnum):
 
 # MFT Record Size
 MFT_RECORD_SIZE: Final[int] = 1024
+FIXUP_STRIDE: Final[int] = 512
 
 # MFT Record Magic Number
 MFT_RECORD_MAGIC: Final[bytes] = b'FILE'
