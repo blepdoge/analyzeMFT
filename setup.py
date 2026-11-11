@@ -30,12 +30,16 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
     ],
     python_requires=">=3.8",
     install_requires=[
-        "pywin32;platform_system=='Windows'",
         "openpyxl==3.1.5",
     ],
+    extras_require={
+        # Optional: only used for a console Ctrl+C handler on Windows (falls back to signal otherwise).
+        'windows': ["pywin32>=306;platform_system=='Windows'"],
+    },
     entry_points={
         'console_scripts': [
             'analyzemft=analyzeMFT:main',

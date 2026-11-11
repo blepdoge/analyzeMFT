@@ -114,9 +114,16 @@ class MftAnalyzer:
             self.interrupt_flag.set()
 
         try:
+            win32api = None
             if sys.platform == "win32":
-                import win32api
+                try:
+                    import win32api  # optional dependency (pip install analyzeMFT[windows])
+                except ImportError:
+                    pass
+            if win32api is not None:
                 win32api.SetConsoleCtrlHandler(lambda x: interrupt_handler(None, None), True)
+            elif sys.platform == "win32":
+                signal.signal(signal.SIGINT, interrupt_handler)
             else:
                 signal.signal(signal.SIGINT, interrupt_handler)
                 signal.signal(signal.SIGTERM, interrupt_handler)

@@ -2,3 +2,4 @@ openpyxl==3.1.5
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pyyaml>=6.0
+# Optional on Windows (console Ctrl+C handler): pip install .[windows]
