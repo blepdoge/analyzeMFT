@@ -243,7 +243,7 @@ async def test_analyze_large_number_of_records(analyzer, mock_mft_file, mock_mft
 
 @pytest.mark.asyncio
 async def test_handle_interrupt(analyzer):
-    with patch('asyncio.get_event_loop') as mock_loop:
+    with patch('asyncio.get_running_loop') as mock_loop:
         analyzer.handle_interrupt()
         mock_loop.return_value.add_signal_handler.assert_called()
 

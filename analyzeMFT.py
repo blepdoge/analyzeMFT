@@ -28,18 +28,21 @@ def setup_path():
         if path not in sys.path:
             sys.path.insert(0, path)
 
+def debug_requested():
+    # Environment diagnostics are only printed with --debug / -D (before argparse runs).
+    return any(arg == '--debug' or (arg.startswith('-D') and set(arg[1:]) == {'D'}) for arg in sys.argv[1:])
+
 def main():
     setup_path()
-    # Debug information for GitHub Actions
-    import sys
-    print(f"Python version: {sys.version}")
-    print(f"Current working directory: {os.getcwd()}")
-    print(f"sys.path (first 5): {sys.path[:5]}")
-    print(f"Contents of current directory: {os.listdir('.')}")
-    if os.path.exists('src'):
-        print(f"Contents of src directory: {os.listdir('src')}")
-        if os.path.exists('src/analyzeMFT'):
-            print(f"Contents of src/analyzeMFT directory: {os.listdir('src/analyzeMFT')}")
+    if debug_requested():
+        print(f"Python version: {sys.version}")
+        print(f"Current working directory: {os.getcwd()}")
+        print(f"sys.path (first 5): {sys.path[:5]}")
+        print(f"Contents of current directory: {os.listdir('.')}")
+        if os.path.exists('src'):
+            print(f"Contents of src directory: {os.listdir('src')}")
+            if os.path.exists('src/analyzeMFT'):
+                print(f"Contents of src/analyzeMFT directory: {os.listdir('src/analyzeMFT')}")
     
     try:
         from analyzeMFT.cli import main as cli_main
@@ -52,9 +55,6 @@ def main():
         except ImportError as e2:
             print(f"Alternative import also failed: {e2}")
             raise
-    
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
     asyncio.run(cli_main())
 

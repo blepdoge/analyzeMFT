@@ -575,7 +575,7 @@ class MftAnalyzer:
     
     def handle_interrupt(self) -> None:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             if hasattr(loop, 'add_signal_handler'):
                 loop.add_signal_handler(signal.SIGINT, self._handle_signal)
                 loop.add_signal_handler(signal.SIGTERM, self._handle_signal)
