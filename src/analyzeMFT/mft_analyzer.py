@@ -61,6 +61,7 @@ class MftAnalyzer:
         self.mft_records: Dict[int, MftRecord] = {}
         self.current_chunk: List[MftRecord] = []
         self.chunk_count = 0
+        self.record_index = 0
         self.stats = {
             'total_records': 0,
             'active_records': 0,
@@ -68,6 +69,7 @@ class MftAnalyzer:
             'files': 0,
             'bytes_processed': 0,
             'chunks_processed': 0,
+            'skipped_records': 0,
         }
         
         if self.compute_hashes:
@@ -112,9 +114,16 @@ class MftAnalyzer:
             self.interrupt_flag.set()
 
         try:
+            win32api = None
             if sys.platform == "win32":
-                import win32api
+                try:
+                    import win32api  # optional dependency (pip install analyzeMFT[windows])
+                except ImportError:
+                    pass
+            if win32api is not None:
                 win32api.SetConsoleCtrlHandler(lambda x: interrupt_handler(None, None), True)
+            elif sys.platform == "win32":
+                signal.signal(signal.SIGINT, interrupt_handler)
             else:
                 signal.signal(signal.SIGINT, interrupt_handler)
                 signal.signal(signal.SIGTERM, interrupt_handler)
@@ -182,6 +191,12 @@ class MftAnalyzer:
                         self.stats['chunks_processed'] += 1
                     
                     records_processed += len(chunk)
+
+                    # Guard against a source that keeps returning data (e.g. a file
+                    # that grows or a misbehaving file object): never read more than
+                    # the size the file had when we started.
+                    if self.stats['bytes_processed'] >= file_size:
+                        break
                     
                     if self.interrupt_flag.is_set():
                         self.logger.warning("Interrupt detected. Stopping processing.")
@@ -242,9 +257,19 @@ class MftAnalyzer:
             if self.interrupt_flag.is_set():
                 break
             
+            position = self.record_index
+            self.record_index += 1
+
+            if not any(raw_record):
+                # Never-used (zero-filled) slot: nothing to report, and it must not
+                # replace a real entry in mft_records.
+                self.stats['skipped_records'] += 1
+                continue
+
             try:
                 compute_individual_hashes = self.compute_hashes and not self.multiprocessing_hashes
-                record = MftRecord(raw_record, compute_individual_hashes, self.debug, self.logger)
+                record = MftRecord(raw_record, compute_individual_hashes, self.debug, self.logger,
+                                   record_number=position)
                 self.stats['total_records'] += 1
                 
                 if self.compute_hashes and self.multiprocessing_hashes and i < len(hash_results):
@@ -404,6 +429,9 @@ class MftAnalyzer:
         current_record = record
         max_depth = 255 
 
+        if not record.is_valid:
+            return f"InvalidRecord_{record.recordnum}"
+
         while current_record and max_depth > 0:
             if current_record.recordnum == 5:
                 path_parts.insert(0, "")
@@ -420,6 +448,8 @@ class MftAnalyzer:
                 break
             
             current_record = self.mft_records.get(parent_record_num)
+            if current_record is not None and not current_record.is_valid:
+                current_record = None
             if not current_record:
                 path_parts.insert(0, f"UnknownParent_{parent_record_num}")
                 break
@@ -439,6 +469,7 @@ class MftAnalyzer:
         self.logger.warning(f"Files: {self.stats['files']}")
         self.logger.warning(f"Bytes processed: {self.stats['bytes_processed']:,}")
         self.logger.warning(f"Chunks processed: {self.stats['chunks_processed']}")
+        self.logger.warning(f"Skipped zero-filled records: {self.stats.get('skipped_records', 0)}")
         
         if self.compute_hashes:
             self.logger.warning(f"Unique MD5 hashes: {len(self.stats['unique_md5'])}")
@@ -446,10 +477,21 @@ class MftAnalyzer:
             self.logger.warning(f"Unique SHA512 hashes: {len(self.stats['unique_sha512'])}")
             self.logger.warning(f"Unique CRC32 hashes: {len(self.stats['unique_crc32'])}")
 
+    def resolve_filepaths(self) -> None:
+        """Set record.filepath on every record, so that the final writers (which
+        only see the records, not the analyzer) can emit the full path."""
+        for record in self.mft_records.values():
+            try:
+                record.filepath = self.build_filepath(record)
+            except Exception as e:
+                self.logger.warning(f"Error building filepath for record {record.recordnum}: {e}")
+                record.filepath = f"UnknownPath_{record.recordnum}"
+
     async def write_output(self) -> None:
         self.logger.warning(f"Writing output in {self.export_format} format to {self.output_file}")
         
         try:
+            self.resolve_filepaths()
             writer_func = get_writer(self.export_format)
             
             if writer_func:
@@ -551,7 +593,7 @@ class MftAnalyzer:
     
     def handle_interrupt(self) -> None:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             if hasattr(loop, 'add_signal_handler'):
                 loop.add_signal_handler(signal.SIGINT, self._handle_signal)
                 loop.add_signal_handler(signal.SIGTERM, self._handle_signal)

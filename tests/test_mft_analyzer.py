@@ -62,20 +62,34 @@ async def test_analyze_with_different_export_formats_fast(export_format, mock_mf
 @pytest.mark.asyncio
 @pytest.mark.slow
 @pytest.mark.parametrize("export_format", ["json", "xml", "excel"])
-async def test_analyze_with_different_export_formats_slow(export_format, mock_mft_file, mock_mft_record):
-    analyzer = MftAnalyzer("test.mft", f"output.{export_format}", debug=0, verbosity=0, compute_hashes=False, export_format=export_format)
-    
-    with patch("builtins.open", mock_open(read_data=mock_mft_file)), \
-         patch("os.path.exists", return_value=True), \
-         patch("os.path.getsize", return_value=len(mock_mft_file)):
-        with patch("src.analyzeMFT.mft_analyzer.MftRecord", return_value=mock_mft_record):
-            with patch("src.analyzeMFT.mft_analyzer.get_writer") as mock_get_writer:
-                mock_writer = AsyncMock()
-                mock_get_writer.return_value = mock_writer
-                await analyzer.analyze()
-                
-                mock_get_writer.assert_called_once_with(export_format)
-                mock_writer.assert_called_once()
+async def test_analyze_with_different_export_formats_slow(export_format, mock_mft_file, mock_mft_record, tmp_path):
+    # Use a real file: a patched builtins.open replays the same data on every open(),
+    # which made the read loop in process_mft run forever once an output file was opened.
+    mft_path = tmp_path / "test.mft"
+    mft_path.write_bytes(mock_mft_file)
+    output_path = tmp_path / f"output.{export_format}"
+    analyzer = MftAnalyzer(str(mft_path), str(output_path), debug=0, verbosity=0, compute_hashes=False, export_format=export_format)
+
+    with patch("src.analyzeMFT.mft_analyzer.MftRecord", return_value=mock_mft_record):
+        with patch("src.analyzeMFT.mft_analyzer.get_writer") as mock_get_writer:
+            mock_writer = AsyncMock()
+            mock_get_writer.return_value = mock_writer
+            await analyzer.analyze()
+
+            mock_get_writer.assert_called_once_with(export_format)
+            mock_writer.assert_called_once()
+            assert analyzer.stats['total_records'] == 1
+
+@pytest.mark.asyncio
+async def test_process_mft_stops_when_source_never_runs_dry(analyzer, mock_mft_file, mock_mft_record):
+    # mock_open replays the data after any further open(); the loop guard must still stop at file size.
+    analyzer.export_format = "json"
+    analyzer.output_file = "never_written.json"
+    async def fake_write_chunk():
+        open("ignored", "w")  # re-opening resets the mock handle, replaying the data
+    with patch("builtins.open", mock_open(read_data=mock_mft_file)),          patch("os.path.getsize", return_value=len(mock_mft_file)),          patch("src.analyzeMFT.mft_analyzer.MftRecord", return_value=mock_mft_record),          patch.object(analyzer, "write_chunk", fake_write_chunk):
+        await asyncio.wait_for(analyzer.process_mft(), timeout=10)
+    assert analyzer.stats['total_records'] == 1
 
 @pytest.mark.asyncio
 async def test_analyze_with_compute_hashes(mock_mft_file, mock_mft_record):
@@ -229,7 +243,7 @@ async def test_analyze_large_number_of_records(analyzer, mock_mft_file, mock_mft
 
 @pytest.mark.asyncio
 async def test_handle_interrupt(analyzer):
-    with patch('asyncio.get_event_loop') as mock_loop:
+    with patch('asyncio.get_running_loop') as mock_loop:
         analyzer.handle_interrupt()
         mock_loop.return_value.add_signal_handler.assert_called()
 

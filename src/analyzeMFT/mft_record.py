@@ -13,12 +13,18 @@ from .validators import validate_attribute_length, ValidationError
 
 class MftRecord:
     
-    def __init__(self, raw_record: bytes, compute_hashes: bool = False, debug_level: int = 0, logger=None):
+    def __init__(self, raw_record: bytes, compute_hashes: bool = False, debug_level: int = 0, logger=None,
+                 record_number: Optional[int] = None):
         
         if len(raw_record) < MFT_RECORD_SIZE:
             raise ValueError(f"MFT record too short: {len(raw_record)} bytes, expected {MFT_RECORD_SIZE}")
 
         self.raw_record = raw_record
+        self.disk_record = raw_record
+        self.fixup_valid = True
+        # Full path; resolved by MftAnalyzer once all records are known.
+        self.filepath = ""
+        self._fn_rank = -1
         self.debug_level = debug_level
         self.logger = logger or logging.getLogger('analyzeMFT.mft_record')
         
@@ -35,6 +41,7 @@ class MftRecord:
         self.base_ref = 0
         self.next_attrid = 0
         self.recordnum = 0
+        self.position_recordnum = record_number
         self.filename = ''
         self.parent_ref = 0
         self.filesize = 0
@@ -108,6 +115,16 @@ class MftRecord:
             self.next_attrid = struct.unpack("<H", self.raw_record[MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET:MFT_RECORD_NEXT_ATTRIBUTE_ID_OFFSET+MFT_RECORD_NEXT_ATTRIBUTE_ID_SIZE])[0]
             self.recordnum = struct.unpack("<I", self.raw_record[MFT_RECORD_RECORD_NUMBER_OFFSET:MFT_RECORD_RECORD_NUMBER_OFFSET+MFT_RECORD_RECORD_NUMBER_SIZE])[0]
             
+            if self.position_recordnum is not None and (not self.is_valid or self.recordnum == 0):
+                # Without a 'FILE' signature the header cannot be trusted, and old
+                # NTFS layouts have no record number field: the position in the MFT
+                # is the record number, so records never collide on number 0.
+                self.recordnum = self.position_recordnum
+
+            if not self.is_valid:
+                return
+
+            self.apply_fixup()
             self.parse_attributes()
 
         except struct.error as e:
@@ -115,34 +132,82 @@ class MftRecord:
         except Exception as e:
             self.log(f"Unexpected error parsing MFT record {self.recordnum}: {e}", 0)
 
+    @property
+    def is_valid(self) -> bool:
+        return self.magic == int.from_bytes(MFT_RECORD_MAGIC, BYTE_ORDER)
+
+    def apply_fixup(self) -> None:
+        """Undo the NTFS update sequence (fixup) protection.
+
+        The last two bytes of every 512-byte stride of the record were replaced on
+        disk by the update sequence number (USN); the original bytes live in the
+        update sequence array. On success self.raw_record holds the restored record
+        (the on-disk bytes are kept in self.disk_record). On any inconsistency
+        self.fixup_valid is set to False and the record is parsed as found.
+        """
+        alloc = self.alloc_sizef
+        if 0 < alloc <= len(self.raw_record) and alloc % FIXUP_STRIDE == 0:
+            record_size = alloc
+        else:
+            record_size = len(self.raw_record)
+
+        usa_end = self.upd_off + 2 * self.upd_cnt
+        if (self.upd_cnt < 2 or self.upd_off < 42 or usa_end > FIXUP_STRIDE
+                or (self.upd_cnt - 1) * FIXUP_STRIDE > record_size):
+            self.log(f"Invalid update sequence array in record {self.recordnum} "
+                     f"(offset {self.upd_off}, count {self.upd_cnt})", 1)
+            self.fixup_valid = False
+            return
+
+        fixed = bytearray(self.raw_record[:record_size])
+        usn = bytes(fixed[self.upd_off:self.upd_off + 2])
+        for i in range(1, self.upd_cnt):
+            end = i * FIXUP_STRIDE
+            if bytes(fixed[end - 2:end]) != usn:
+                self.log(f"Update sequence mismatch in record {self.recordnum} at sector {i}", 1)
+                self.fixup_valid = False
+                continue
+            saved = self.upd_off + 2 * i
+            fixed[end - 2:end] = fixed[saved:saved + 2]
+
+        self.raw_record = fixed
+
     def parse_attributes(self) -> None:
         offset = int(self.attr_off)
-        
-        while offset < len(self.raw_record) - 8:
-            try:
-                self.log(f"Parsing attribute at offset {offset}", 3)
-                
-                attr_type = int(struct.unpack("<L", self.raw_record[offset:offset+4])[0])
-                attr_len = int(struct.unpack("<L", self.raw_record[offset+4:offset+8])[0])
-                
-                self.log(f"Attribute type: {attr_type}, length: {attr_len}", 3)
 
-                if attr_type == 0xffffffff or attr_len == 0:
-                    self.log("End of attributes reached", 3)
-                    break
-                
-                try:
-                    validate_attribute_length(
-                        attr_len=attr_len,
-                        offset=offset,
-                        record_size=len(self.raw_record),
-                        attr_type=attr_type
-                    )
-                except ValidationError as e:
-                    self.log(f"Attribute validation failed at record {getattr(self, 'recordnum', 'unknown')}: {e}", 0)
-                    offset += 8
-                    continue
-                
+        # Never walk past the bytes actually in use (falls back to the whole
+        # buffer if the header's used size is implausible).
+        end = len(self.raw_record)
+        if offset + 8 <= self.size <= end:
+            end = self.size
+
+        while offset + 8 <= end:
+            attr_type = int(struct.unpack("<L", self.raw_record[offset:offset+4])[0])
+            if attr_type == 0xffffffff:
+                self.log("End of attributes reached", 3)
+                break
+
+            attr_len = int(struct.unpack("<L", self.raw_record[offset+4:offset+8])[0])
+            self.log(f"Attribute type: {attr_type}, length: {attr_len}, offset: {offset}", 3)
+
+            try:
+                if attr_len < 16:
+                    raise ValidationError(f"Attribute length {attr_len} is smaller than an attribute header")
+                if offset + attr_len > end:
+                    raise ValidationError(f"Attribute at {offset} (length {attr_len}) extends past the used size {end}")
+                validate_attribute_length(
+                    attr_len=attr_len,
+                    offset=offset,
+                    record_size=len(self.raw_record),
+                    attr_type=attr_type
+                )
+            except ValidationError as e:
+                # Without a trustworthy length there is no way to find the next
+                # attribute, so stop instead of parsing garbage.
+                self.log(f"Attribute validation failed at record {self.recordnum}: {e}", 0)
+                break
+
+            try:
                 self.attribute_types.add(attr_type)
 
                 if attr_type == STANDARD_INFORMATION_ATTRIBUTE:
@@ -176,16 +241,12 @@ class MftRecord:
                 elif attr_type == LOGGED_UTILITY_STREAM_ATTRIBUTE:
                     self.parse_logged_utility_stream(offset)
 
-                offset += attr_len
-
             except Exception as e:
-                self.log(f"Error processing record {self.recordnum}: {str(e)}", 0)
-                self.log(f"attr_type: {attr_type} (type: {type(attr_type)})", 3)
-                self.log(f"attr_len: {attr_len} (type: {type(attr_len)})", 3)
-                self.log(f"offset: {offset}", 3)
+                self.log(f"Error processing attribute type {attr_type} at offset {offset} of record {self.recordnum}: {str(e)}", 0)
                 if self.debug_level >= 2:
                     traceback.print_exc()
-                offset += 1
+
+            offset += attr_len
 
     def parse_si_attribute(self, offset: int) -> None:
         try:
@@ -205,6 +266,17 @@ class MftRecord:
         try:
             fn_data = self.raw_record[offset+24:]
             if len(fn_data) >= 64:
+                # A file normally has several $FILE_NAME attributes (e.g. a Win32 long
+                # name plus its DOS 8.3 alias, or one per hard link). Prefer any real
+                # name over a DOS-only one and keep the first of equal rank.
+                name_len = struct.unpack("B", fn_data[64:65])[0]
+                namespace = struct.unpack("B", fn_data[65:66])[0] if len(fn_data) >= 66 else FILE_NAME_POSIX
+                rank = 0 if namespace == FILE_NAME_DOS else 1
+                if rank <= self._fn_rank:
+                    return
+                if len(fn_data) < 66 + name_len * 2:
+                    return
+                self._fn_rank = rank
                 self.parent_ref = struct.unpack("<Q", fn_data[:8])[0] & 0x0000FFFFFFFFFFFF
                 timestamps = struct.unpack("<QQQQ", fn_data[8:40])
                 self.fn_times = {
@@ -214,9 +286,7 @@ class MftRecord:
                     'atime': WindowsTime(timestamps[3] & 0xFFFFFFFF, timestamps[3] >> 32)
                 }
                 self.filesize = struct.unpack("<Q", fn_data[48:56])[0]
-                name_len = struct.unpack("B", fn_data[64:65])[0]
-                if len(fn_data) >= 66 + name_len * 2:
-                    self.filename = fn_data[66:66+name_len*2].decode('utf-16-le', errors='replace')
+                self.filename = fn_data[66:66+name_len*2].decode('utf-16-le', errors='replace')
         except struct.error as e:
             self.log(f"Error parsing FN attribute for record {self.recordnum}: {e}", 1)
 
@@ -448,14 +518,14 @@ class MftRecord:
     def to_csv(self) -> List[Union[str, int]]:
         row = [
             self.recordnum,
-            "Valid" if self.magic == int.from_bytes(MFT_RECORD_MAGIC, BYTE_ORDER) else "Invalid",
+            "Valid" if self.is_valid else "Invalid",
             "In Use" if self.flags & FILE_RECORD_IN_USE else "Not in Use",
             self.get_file_type(),
             self.seq,
             self.get_parent_record_num(),
             self.base_ref >> 48,
             
-            self.filename, "",  
+            self.filename, self.filepath,
             
             self.si_times['crtime'].dtstr,
             self.si_times['mtime'].dtstr,
