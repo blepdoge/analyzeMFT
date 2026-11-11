@@ -22,6 +22,8 @@ class MftRecord:
         self.raw_record = raw_record
         self.disk_record = raw_record
         self.fixup_valid = True
+        # Full path; resolved by MftAnalyzer once all records are known.
+        self.filepath = ""
         self._fn_rank = -1
         self.debug_level = debug_level
         self.logger = logger or logging.getLogger('analyzeMFT.mft_record')
@@ -523,7 +525,7 @@ class MftRecord:
             self.get_parent_record_num(),
             self.base_ref >> 48,
             
-            self.filename, "",  
+            self.filename, self.filepath,
             
             self.si_times['crtime'].dtstr,
             self.si_times['mtime'].dtstr,

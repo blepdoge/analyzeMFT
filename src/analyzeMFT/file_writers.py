@@ -12,6 +12,11 @@ from .constants import *
 
 logger = logging.getLogger('analyzeMFT.writers')
 
+
+def _record_name(record: MftRecord, default: str = '') -> str:
+    """Full path when the analyzer resolved one, else the bare filename."""
+    return getattr(record, 'filepath', '') or record.filename or default
+
 class FileWriters:
     
     @staticmethod
@@ -91,7 +96,7 @@ class FileWriters:
                         ctime = getattr(record.fn_times.get('ctime'), 'unixtime', 0) or 0
                         crtime = getattr(record.fn_times.get('crtime'), 'unixtime', 0) or 0
                         
-                        bodyfile.write(f"0|{record.filename or ''}|{record.recordnum}|{record.flags:04o}|0|0|"
+                        bodyfile.write(f"0|{_record_name(record)}|{record.recordnum}|{record.flags:04o}|0|0|"
                                      f"{record.filesize or 0}|{atime}|{mtime}|{ctime}|{crtime}\n")
                     except Exception as e:
                         logger.warning(f"Error writing record {record.recordnum} to body file: {e}")
@@ -113,7 +118,7 @@ class FileWriters:
                         atime = getattr(record.fn_times.get('atime'), 'unixtime', 0) or 0
                         ctime = getattr(record.fn_times.get('ctime'), 'unixtime', 0) or 0
                         
-                        filename = record.filename or "Unknown"
+                        filename = _record_name(record, "Unknown")
                         
                         timeline.write(f"{crtime}|MFT|CREATE|||||{filename}|{record.recordnum}||||\n")
                         timeline.write(f"{mtime}|MFT|MODIFY|||||{filename}|{record.recordnum}||||\n")
@@ -134,7 +139,7 @@ class FileWriters:
                 
                 for record in records:
                     try:
-                        filename = record.filename or "Unknown"
+                        filename = _record_name(record, "Unknown")
                         
                         for time_type, time_obj in record.fn_times.items():
                             if time_obj is None:
@@ -247,7 +252,7 @@ class FileWriters:
                         ctime = getattr(record.fn_times.get('ctime'), 'unixtime', 0) or 0
                         crtime = getattr(record.fn_times.get('crtime'), 'unixtime', 0) or 0
                         
-                        tskfile.write(f"0|{record.filename or ''}|{record.recordnum}|{record.flags:04o}|0|0|"
+                        tskfile.write(f"0|{_record_name(record)}|{record.recordnum}|{record.flags:04o}|0|0|"
                                     f"{record.filesize or 0}|{atime}|{mtime}|{ctime}|{crtime}\n")
                     except Exception as e:
                         logger.warning(f"Error writing record {record.recordnum} to TSK file: {e}")

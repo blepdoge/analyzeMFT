@@ -477,10 +477,21 @@ class MftAnalyzer:
             self.logger.warning(f"Unique SHA512 hashes: {len(self.stats['unique_sha512'])}")
             self.logger.warning(f"Unique CRC32 hashes: {len(self.stats['unique_crc32'])}")
 
+    def resolve_filepaths(self) -> None:
+        """Set record.filepath on every record, so that the final writers (which
+        only see the records, not the analyzer) can emit the full path."""
+        for record in self.mft_records.values():
+            try:
+                record.filepath = self.build_filepath(record)
+            except Exception as e:
+                self.logger.warning(f"Error building filepath for record {record.recordnum}: {e}")
+                record.filepath = f"UnknownPath_{record.recordnum}"
+
     async def write_output(self) -> None:
         self.logger.warning(f"Writing output in {self.export_format} format to {self.output_file}")
         
         try:
+            self.resolve_filepaths()
             writer_func = get_writer(self.export_format)
             
             if writer_func:
